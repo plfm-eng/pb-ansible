@@ -67,6 +67,35 @@
       ansible.builtin.debug:
         msg: "{{ backup.stdout | default('sin respaldo: no habia version instalada') | trim }}"
 
+    - name: Ver si alguien esta usando la aplicacion (procesos y sesiones)
+      ansible.windows.win_shell: |
+        $enUso = @()
+        Get-Process | Where-Object { $_.Path -like '{{ app_dir }}\*' } | ForEach-Object { $enUso += "proceso $($_.ProcessName) (PID $($_.Id)) usuario $((Get-CimInstance Win32_Process -Filter "ProcessId=$($_.Id)").GetOwner().User)" }
+        Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*pb-app*' -and $_.CommandLine -notlike '*smoke.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { $enUso += "proceso $($_.Name) (PID $($_.ProcessId)) ejecutando: $($_.CommandLine)" }
+        $sesiones = (quser 2>$null | Select-Object -Skip 1 | ForEach-Object { ($_ -split '\s+')[1] }) -join ', '
+        if ($enUso.Count -eq 0) { "sin procesos de la aplicacion en ejecucion" } else { $enUso }
+        if ($sesiones) { "sesiones de usuario abiertas: $sesiones" } else { "sin sesiones de usuario abiertas" }
+      register: uso
+      changed_when: false
+
+    - name: Estado de uso antes del cambio
+      ansible.builtin.debug:
+        msg: "{{ uso.stdout_lines }}"
+
+    - name: Cerrar los procesos de la aplicacion para poder reemplazar sus archivos
+      ansible.windows.win_shell: |
+        $cerrados = @()
+        Get-Process | Where-Object { $_.Path -like '{{ app_dir }}\*' } | ForEach-Object { Stop-Process -Id $_.Id -Force; $cerrados += "cerrado $($_.ProcessName) (PID $($_.Id))" }
+        Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*pb-app*' -and $_.CommandLine -notlike '*smoke.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $cerrados += "cerrado $($_.Name) (PID $($_.ProcessId))" }
+        Start-Sleep -Seconds 2
+        if ($cerrados.Count -eq 0) { "nada que cerrar" } else { $cerrados }
+      register: cierre
+      changed_when: "'cerrado' in cierre.stdout"
+
+    - name: Procesos cerrados
+      ansible.builtin.debug:
+        msg: "{{ cierre.stdout_lines }}"
+
     - name: Instalar y probar; si falla, volver a la version anterior
       block:
         - name: Instalar {{ version }} en silencio (Inno Setup /VERYSILENT)
