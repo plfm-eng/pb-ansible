@@ -18,10 +18,15 @@
       register: iscc
     - name: Descargar Inno Setup EN EL RUNNER (pb-build no sale a Internet; solo el runner tiene salida 443)
       ansible.builtin.get_url:
-        url: https://jrsoftware.org/download.php/is.exe
+        url: https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe
         dest: "{{ dist_dir }}/innosetup.exe"
         mode: "0644"
       delegate_to: localhost
+      when: not iscc.stat.exists
+    - name: Verificar que lo descargado es un ejecutable de Windows (no una pagina web)
+      ansible.builtin.shell: head -c 2 "{{ dist_dir }}/innosetup.exe" | grep -q MZ && stat -c %s "{{ dist_dir }}/innosetup.exe"
+      delegate_to: localhost
+      changed_when: false
       when: not iscc.stat.exists
     - name: Copiar el instalador de Inno Setup a pb-build por WinRM
       ansible.windows.win_copy:
