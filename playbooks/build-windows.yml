@@ -8,15 +8,25 @@
     source_zip: "{{ lookup('env', 'PB_SOURCE_ZIP') }}"
     dist_dir: "{{ lookup('env', 'PB_DIST_DIR') }}"
   tasks:
-    - name: Asegurar Inno Setup (gratuito) en pb-build
+    - name: Carpeta base en pb-build
+      ansible.windows.win_file:
+        path: 'C:\pb-build'
+        state: directory
+    - name: Comprobar si Inno Setup (gratuito) ya esta en pb-build
       ansible.windows.win_stat:
         path: 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
       register: iscc
-    - name: Descargar Inno Setup
-      ansible.windows.win_get_url:
+    - name: Descargar Inno Setup EN EL RUNNER (pb-build no sale a Internet; solo el runner tiene salida 443)
+      ansible.builtin.get_url:
         url: https://jrsoftware.org/download.php/is.exe
+        dest: "{{ dist_dir }}/innosetup.exe"
+        mode: "0644"
+      delegate_to: localhost
+      when: not iscc.stat.exists
+    - name: Copiar el instalador de Inno Setup a pb-build por WinRM
+      ansible.windows.win_copy:
+        src: "{{ dist_dir }}/innosetup.exe"
         dest: 'C:\pb-build\innosetup.exe'
-        follow_redirects: all
       when: not iscc.stat.exists
     - name: Instalar Inno Setup en silencio
       ansible.windows.win_package:
