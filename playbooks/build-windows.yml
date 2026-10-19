@@ -1,0 +1,51 @@
+---
+- name: Compilar y empaquetar en pb-build (Windows, WinRM 5986)
+  hosts: build
+  gather_facts: false
+  vars:
+    workspace: 'C:\pb-build\work'
+    version: "{{ lookup('env', 'PB_VERSION') }}"
+    source_zip: "{{ lookup('env', 'PB_SOURCE_ZIP') }}"
+    dist_dir: "{{ lookup('env', 'PB_DIST_DIR') }}"
+  tasks:
+    - name: Asegurar Inno Setup (gratuito) en pb-build
+      ansible.windows.win_stat:
+        path: 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+      register: iscc
+    - name: Descargar Inno Setup
+      ansible.windows.win_get_url:
+        url: https://jrsoftware.org/download.php/is.exe
+        dest: 'C:\pb-build\innosetup.exe'
+        follow_redirects: all
+      when: not iscc.stat.exists
+    - name: Instalar Inno Setup en silencio
+      ansible.windows.win_package:
+        path: 'C:\pb-build\innosetup.exe'
+        arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /ALLUSERS
+        creates_path: 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+      when: not iscc.stat.exists
+    - name: Limpiar el espacio de trabajo
+      ansible.windows.win_file:
+        path: "{{ workspace }}"
+        state: absent
+    - name: Crear el espacio de trabajo
+      ansible.windows.win_file:
+        path: "{{ workspace }}"
+        state: directory
+    - name: Copiar el codigo fuente (zip del commit)
+      ansible.windows.win_copy:
+        src: "{{ source_zip }}"
+        dest: "{{ workspace }}\\fuente.zip"
+    - name: Descomprimir el codigo
+      ansible.windows.win_shell: tar -xf "{{ workspace }}\fuente.zip" -C "{{ workspace }}"
+    - name: Ejecutar el build (PBAutoBuild si existe + Inno Setup)
+      ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File "{{ workspace }}\build\build-pb.ps1" -Version "{{ version }}" -Workspace "{{ workspace }}"
+      register: build
+    - name: Salida del build
+      ansible.builtin.debug:
+        msg: "{{ build.stdout_lines }}"
+    - name: Recuperar el instalador al runner
+      ansible.builtin.fetch:
+        src: "{{ workspace }}\\dist\\pb-app-setup-{{ version }}.exe"
+        dest: "{{ dist_dir }}/"
+        flat: true

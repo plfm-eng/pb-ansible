@@ -1,40 +1,38 @@
 ---
-- name: Desplegar pb-app en la VM Windows del ambiente (WinRM 5986)
+- name: Instalar pb-app en la VM Windows del ambiente y probar (WinRM 5986)
   hosts: targets
   gather_facts: true
   vars:
-    app_root: 'C:\pb-app'
-    package_path: "{{ lookup('env', 'PB_PACKAGE') }}"
     version: "{{ lookup('env', 'PB_VERSION') }}"
+    installer: "{{ lookup('env', 'PB_INSTALLER') }}"
+    smoke_test: "{{ lookup('env', 'PB_SMOKE_TEST') }}"
   tasks:
-    - name: Mostrar el sistema operativo de la VM destino
+    - name: Sistema operativo de la VM destino
       ansible.builtin.debug:
         msg: "{{ ansible_os_name }} ({{ ansible_architecture }})"
-
-    - name: Crear carpetas de la aplicacion
+    - name: Carpeta de instaladores
       ansible.windows.win_file:
-        path: "{{ item }}"
+        path: 'C:\pb-app-instaladores'
         state: directory
-      loop:
-        - "{{ app_root }}\\instaladores"
-        - "{{ app_root }}\\app"
-
-    - name: Copiar el instalador generado por el build
+    - name: Copiar el instalador generado en pb-build
       ansible.windows.win_copy:
-        src: "{{ package_path }}"
-        dest: "{{ app_root }}\\instaladores\\pb-app-{{ version }}.tar.gz"
-
-    - name: Instalar en silencio (en la version real es el setup.exe de Inno Setup con /VERYSILENT)
-      ansible.windows.win_shell: >
-        tar -xzf "{{ app_root }}\instaladores\pb-app-{{ version }}.tar.gz"
-        -C "{{ app_root }}\app" --strip-components=1
-
-    - name: Verificar la version instalada
-      ansible.windows.win_shell: Select-String -Path "{{ app_root }}\app\index.html" -Pattern 'version [0-9.]+' | ForEach-Object { $_.Matches.Value }
-      register: instalado
+        src: "{{ installer }}"
+        dest: 'C:\pb-app-instaladores\pb-app-setup-{{ version }}.exe'
+    - name: Copiar las pruebas de humo
+      ansible.windows.win_copy:
+        src: "{{ smoke_test }}"
+        dest: 'C:\pb-app-instaladores\smoke.ps1'
+    - name: Instalar en silencio (Inno Setup /VERYSILENT)
+      ansible.windows.win_package:
+        path: 'C:\pb-app-instaladores\pb-app-setup-{{ version }}.exe'
+        arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+        product_id: '{7E3B1C2A-PBAPP-POC-0001}_is1'
+        state: present
+      register: instalacion
+    - name: Ejecutar las pruebas de humo
+      ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File C:\pb-app-instaladores\smoke.ps1 -Version "{{ version }}"
+      register: pruebas
       changed_when: false
-      failed_when: "('version ' + version) not in instalado.stdout"
-
-    - name: Resultado
+    - name: Resultado de las pruebas
       ansible.builtin.debug:
-        msg: "Instalado en {{ app_root }}\\app: {{ instalado.stdout | trim }}"
+        msg: "{{ pruebas.stdout_lines }}"
