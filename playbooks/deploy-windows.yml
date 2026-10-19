@@ -1,44 +1,116 @@
 ---
-- name: Instalar pb-app en la VM Windows del ambiente y probar (WinRM 5986)
+# Despliegue (o rollback) de pb-app en la VM Windows de un ambiente, por WinRM 5986.
+# Entradas por variables de entorno: PB_ENV, PB_VERSION, PB_INSTALLER, PB_SMOKE_TEST, PB_MODE (deploy | rollback)
+# Convencion en la VM destino:
+#   C:\pb-app-instaladores\<env>\pb-app-<env>-<version>-setup.exe   instaladores recibidos (uno por version)
+#   C:\pb-app-instaladores\<env>\actual.txt / anterior.txt            version instalada y version previa
+#   C:\pb-app-backups\<env>\pb-app-<env>-<version>-<fecha>.zip        respaldo de la carpeta instalada antes de cada cambio
+- name: Desplegar o revertir pb-app en la VM Windows del ambiente
   hosts: targets
   gather_facts: true
   vars:
+    env_name: "{{ lookup('env', 'PB_ENV') }}"
     version: "{{ lookup('env', 'PB_VERSION') }}"
     installer: "{{ lookup('env', 'PB_INSTALLER') }}"
     smoke_test: "{{ lookup('env', 'PB_SMOKE_TEST') }}"
+    mode: "{{ lookup('env', 'PB_MODE') | default('deploy', true) }}"
+    app_id: '{7E3B1C2A-PBAPP-POC-0001}_is1'
+    app_dir: 'C:\Program Files\pb-app'
+    inst_dir: 'C:\pb-app-instaladores\{{ env_name }}'
+    bak_dir: 'C:\pb-app-backups\{{ env_name }}'
+    target_installer: '{{ inst_dir }}\pb-app-{{ env_name }}-{{ version }}-setup.exe'
   tasks:
     - name: Sistema operativo de la VM destino
       ansible.builtin.debug:
-        msg: "{{ ansible_os_name }} ({{ ansible_architecture }})"
-    - name: Carpeta de instaladores
+        msg: "{{ ansible_os_name }} ({{ ansible_architecture }}) - ambiente {{ env_name }} - modo {{ mode }} - version solicitada {{ version }}"
+
+    - name: Carpetas de instaladores y respaldos del ambiente
       ansible.windows.win_file:
-        path: 'C:\pb-app-instaladores'
+        path: "{{ item }}"
         state: directory
-    - name: Copiar el instalador generado en pb-build
+      loop: ["{{ inst_dir }}", "{{ bak_dir }}"]
+
+    - name: Leer la version instalada actualmente (registro de Windows)
+      ansible.windows.win_reg_stat:
+        path: 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{ app_id }}'
+        name: DisplayVersion
+      register: reg
+
+    - name: Version actual
+      ansible.builtin.set_fact:
+        current_version: "{{ reg.value if reg.exists else 'ninguna' }}"
+
+    - name: Mostrar la situacion antes del cambio
+      ansible.builtin.debug:
+        msg: "Instalada: {{ current_version }} -> solicitada: {{ version }}"
+
+    - name: Copiar el instalador con el nombre del ambiente (repo-ambiente-version)
       ansible.windows.win_copy:
         src: "{{ installer }}"
-        dest: 'C:\pb-app-instaladores\pb-app-setup-{{ version }}.exe'
+        dest: "{{ target_installer }}"
+
     - name: Copiar las pruebas de humo
       ansible.windows.win_copy:
         src: "{{ smoke_test }}"
-        dest: 'C:\pb-app-instaladores\smoke.ps1'
-    - name: Retirar una instalacion previa de 32 bits si existe (primer intento de la PoC)
+        dest: "{{ inst_dir }}\\smoke.ps1"
+
+    - name: Respaldar la instalacion actual antes de tocarla
       ansible.windows.win_shell: |
-        $u = 'C:\Program Files (x86)\pb-app\unins000.exe'
-        if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait; "desinstalada" } else { "no habia" }
-      register: previa
-      changed_when: "'desinstalada' in previa.stdout"
-    - name: Instalar en silencio (Inno Setup /VERYSILENT)
-      ansible.windows.win_package:
-        path: 'C:\pb-app-instaladores\pb-app-setup-{{ version }}.exe'
-        arguments: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-        product_id: '{7E3B1C2A-PBAPP-POC-0001}_is1'
-        state: present
-      register: instalacion
-    - name: Ejecutar las pruebas de humo
-      ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File C:\pb-app-instaladores\smoke.ps1 -Version "{{ version }}"
-      register: pruebas
-      changed_when: false
-    - name: Resultado de las pruebas
+        $f = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $zip = "{{ bak_dir }}\pb-app-{{ env_name }}-{{ current_version }}-$f.zip"
+        Compress-Archive -Path '{{ app_dir }}\*' -DestinationPath $zip -Force
+        "respaldo: $zip ($([math]::Round((Get-Item $zip).Length/1KB)) KB)"
+      register: backup
+      when: current_version != 'ninguna'
+
+    - name: Resultado del respaldo
       ansible.builtin.debug:
-        msg: "{{ pruebas.stdout_lines }}"
+        msg: "{{ backup.stdout | default('sin respaldo: no habia version instalada') | trim }}"
+
+    - name: Instalar y probar; si falla, volver a la version anterior
+      block:
+        - name: Instalar {{ version }} en silencio (Inno Setup /VERYSILENT)
+          ansible.windows.win_shell: >
+            Start-Process -FilePath '{{ target_installer }}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru | Select-Object -ExpandProperty ExitCode
+          register: setup
+          failed_when: setup.stdout | trim != '0'
+
+        - name: Ejecutar las pruebas de humo de {{ version }}
+          ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File {{ inst_dir }}\smoke.ps1 -Version "{{ version }}"
+          register: pruebas
+          changed_when: false
+
+        - name: Resultado de las pruebas
+          ansible.builtin.debug:
+            msg: "{{ pruebas.stdout_lines }}"
+
+        - name: Registrar la version instalada y la anterior
+          ansible.windows.win_copy:
+            content: "{{ item.c }}"
+            dest: "{{ inst_dir }}\\{{ item.f }}"
+          loop:
+            - { f: actual.txt, c: "{{ version }}" }
+            - { f: anterior.txt, c: "{{ current_version }}" }
+      rescue:
+        - name: Fallo la instalacion o las pruebas
+          ansible.builtin.debug:
+            msg: "{{ (pruebas.stdout_lines | default([])) + [ 'FALLO en ' + version + ': se revierte a ' + current_version ] }}"
+
+        - name: ROLLBACK AUTOMATICO - reinstalar la version anterior {{ current_version }}
+          ansible.windows.win_shell: >
+            Start-Process -FilePath '{{ inst_dir }}\pb-app-{{ env_name }}-{{ current_version }}-setup.exe' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru | Select-Object -ExpandProperty ExitCode
+          when: current_version != 'ninguna' and mode == 'deploy'
+
+        - name: Verificar que la version anterior volvio a funcionar
+          ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File {{ inst_dir }}\smoke.ps1 -Version "{{ current_version }}"
+          register: pruebas_rb
+          changed_when: false
+          when: current_version != 'ninguna' and mode == 'deploy'
+
+        - name: Resultado del rollback automatico
+          ansible.builtin.debug:
+            msg: "{{ pruebas_rb.stdout_lines | default(['sin rollback automatico (no habia version anterior o modo rollback)']) }}"
+
+        - name: Dejar el job en rojo
+          ansible.builtin.fail:
+            msg: "Despliegue de {{ version }} fallido en {{ env_name }}; la VM quedo en {{ current_version }}"
