@@ -70,10 +70,12 @@
     - name: Instalar y probar; si falla, volver a la version anterior
       block:
         - name: Instalar {{ version }} en silencio (Inno Setup /VERYSILENT)
-          ansible.windows.win_shell: >
-            Start-Process -FilePath '{{ target_installer }}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru | Select-Object -ExpandProperty ExitCode
+          ansible.windows.win_shell: |
+            $p = Start-Process -FilePath '{{ target_installer }}' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru
+            $p.WaitForExit()
+            "codigo de salida del instalador: $($p.ExitCode)"
+            if ($p.ExitCode -ne 0) { exit $p.ExitCode }
           register: setup
-          failed_when: setup.stdout | trim != '0'
 
         - name: Ejecutar las pruebas de humo de {{ version }}
           ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File {{ inst_dir }}\smoke.ps1 -Version "{{ version }}"
@@ -96,10 +98,23 @@
           ansible.builtin.debug:
             msg: "{{ (pruebas.stdout_lines | default([])) + [ 'FALLO en ' + version + ': se revierte a ' + current_version ] }}"
 
-        - name: ROLLBACK AUTOMATICO - reinstalar la version anterior {{ current_version }}
-          ansible.windows.win_shell: >
-            Start-Process -FilePath '{{ inst_dir }}\pb-app-{{ env_name }}-{{ current_version }}-setup.exe' -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru | Select-Object -ExpandProperty ExitCode
+        - name: ROLLBACK AUTOMATICO - reinstalar {{ current_version }} desde su instalador o, si no esta, restaurar el respaldo
+          ansible.windows.win_shell: |
+            $inst = '{{ inst_dir }}\pb-app-{{ env_name }}-{{ current_version }}-setup.exe'
+            if (Test-Path $inst) {
+              $p = Start-Process -FilePath $inst -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -PassThru; $p.WaitForExit()
+              "reinstalado desde $inst (codigo $($p.ExitCode))"; if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+            } else {
+              $zip = Get-ChildItem '{{ bak_dir }}\pb-app-{{ env_name }}-{{ current_version }}-*.zip' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+              if (-not $zip) { throw "no hay instalador ni respaldo de {{ current_version }}" }
+              Expand-Archive -Path $zip.FullName -DestinationPath '{{ app_dir }}' -Force
+              "restaurado desde el respaldo $($zip.Name)"
+            }
+          register: rb
           when: current_version != 'ninguna' and mode == 'deploy'
+        - name: Como se revirtio
+          ansible.builtin.debug:
+            msg: "{{ rb.stdout_lines | default(['sin rollback']) }}"
 
         - name: Verificar que la version anterior volvio a funcionar
           ansible.windows.win_shell: powershell -NoProfile -ExecutionPolicy Bypass -File {{ inst_dir }}\smoke.ps1 -Version "{{ current_version }}"
