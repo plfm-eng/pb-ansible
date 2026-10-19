@@ -22,6 +22,12 @@
       ansible.windows.win_copy:
         src: "{{ smoke_test }}"
         dest: 'C:\pb-app-instaladores\smoke.ps1'
+    - name: Retirar una instalacion previa de 32 bits si existe (primer intento de la PoC)
+      ansible.windows.win_shell: |
+        $u = 'C:\Program Files (x86)\pb-app\unins000.exe'
+        if (Test-Path $u) { Start-Process -FilePath $u -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait; "desinstalada" } else { "no habia" }
+      register: previa
+      changed_when: "'desinstalada' in previa.stdout"
     - name: Instalar en silencio (Inno Setup /VERYSILENT)
       ansible.windows.win_package:
         path: 'C:\pb-app-instaladores\pb-app-setup-{{ version }}.exe'
