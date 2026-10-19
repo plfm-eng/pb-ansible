@@ -1,0 +1,57 @@
+---
+- name: Desplegar pb-app en la VM destino del ambiente
+  hosts: targets
+  become: true
+  vars:
+    app_root: /var/www/pb-app
+    package_path: "{{ lookup('env', 'PB_PACKAGE') }}"
+  tasks:
+    - name: Instalar nginx (servidor que publica la aplicacion)
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+
+    - name: Crear carpeta de la aplicacion
+      ansible.builtin.file:
+        path: "{{ app_root }}"
+        state: directory
+        mode: "0755"
+
+    - name: Instalar el paquete generado por el build (en silencio)
+      ansible.builtin.unarchive:
+        src: "{{ package_path }}"
+        dest: "{{ app_root }}"
+        extra_opts: ["--strip-components=1"]
+
+    - name: Publicar la aplicacion en nginx
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/default
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              root {{ app_root }};
+              index index.html;
+          }
+      notify: Reiniciar nginx
+
+    - name: Forzar el reinicio antes de verificar
+      ansible.builtin.meta: flush_handlers
+
+    - name: Verificar que la aplicacion responde
+      ansible.builtin.uri:
+        url: http://127.0.0.1/
+        return_content: true
+      register: check
+      failed_when: "'pb-app' not in check.content"
+
+    - name: Mostrar la version desplegada
+      ansible.builtin.debug:
+        msg: "{{ check.content | regex_search('version [0-9a-z.-]+') }}"
+
+  handlers:
+    - name: Reiniciar nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted

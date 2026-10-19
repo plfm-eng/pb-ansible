@@ -1,0 +1,2 @@
+[targets]
+pb-target-dev-01 ansible_host=10.0.2.X ansible_user=ubuntu
